@@ -489,7 +489,7 @@ with st.sidebar:
         help="Generate at myaccount.google.com → Security → App Passwords",
     )
     st.markdown("---")
-    st.caption("💡 **Tip:** Enable 2-Step Verification on your Google account, then create a 16-character App Password dedicated to this app.")
+    st.caption(" **Tip:** Enable 2-Step Verification on your Google account, then create a 16-character App Password dedicated to this app.")
 
 
 # ──────────────────────────────────────────────
@@ -539,7 +539,7 @@ with st.form("minutes_form", clear_on_submit=False):
     with col2:
         subject_line = st.text_input(
             "Email Subject Line",
-            value=f"MUNA GEORGIA Minutes – {meeting_date.strftime('%d %B %Y')}",
+            value=f"MUNA GEORGIA Member Meeting Minutes – {meeting_date.strftime('%d %B %Y')}",
         )
 
     col3, col4 = st.columns(2)
@@ -671,7 +671,7 @@ if recipients_df is not None and minutes_text.strip() and president_name.strip()
         st.download_button(
             "Download Signed Minutes PDF",
             pdf_bytes,
-            file_name=f"MUNA_GEORGIA_Meeting_Minutes_{meeting_date}.pdf",
+            file_name=f"MUNA_GEORGIA_Member_Meeting_Minutes_{meeting_date}.pdf",
             mime="application/pdf",
         )
     except Exception as e:
@@ -682,7 +682,6 @@ if recipients_df is not None and minutes_text.strip() and president_name.strip()
 # ──────────────────────────────────────────────
 st.markdown("""
 <div style="text-align: center; margin-top: 2rem; padding: 1rem; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.8rem;">
-    All rights reserved @ MUNA GEORGIA | MD SAZIDUL ISLAM<br>
-    <a href="https://www.sazidshovon.tech" target="_blank" style="color: var(--gold); text-decoration: none;">www.sazidshovon.tech</a>
+    All rights reserved MUNA GEORGIA | <a href="https://www.sazidshovon.tech" target="_blank" style="color: var(--gold); text-decoration: none;">Sazid Shovon</a>
 </div>
 """, unsafe_allow_html=True)
