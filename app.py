@@ -1,9 +1,11 @@
 import streamlit as st
+import re
 import smtplib
 import pandas as pd
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
+from email.mime.application import MIMEApplication
 from datetime import date
 from pathlib import Path
 import unicodedata
@@ -233,6 +235,73 @@ def load_recipients(excel_file) -> pd.DataFrame:
     return df
 
 
+def normalize_email(email: str) -> str:
+    return str(email).strip().lower()
+
+
+def make_recipient(name: str, email: str, source: str = "Excel") -> dict:
+    return {
+        "Name": str(name).strip() or str(email).strip(),
+        "Email": str(email).strip(),
+        "Source": source,
+    }
+
+
+def parse_manual_emails(raw_text: str) -> list[dict]:
+    if not raw_text:
+        return []
+
+    parts = re.split(r"[\n,;]+", raw_text.strip())
+    recipients = []
+    seen = set()
+
+    for part in parts:
+        email = part.strip()
+        if not email:
+            continue
+        normalized = normalize_email(email)
+        if "@" not in email or "." not in email:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        name = email.split("@")[0].replace(".", " ").replace("_", " ").title()
+        recipients.append(make_recipient(name, email, source="Manual"))
+
+    return recipients
+
+
+def merge_recipient_lists(primary: list[dict], additions: list[dict]) -> list[dict]:
+    existing = {normalize_email(r["Email"]): r for r in primary}
+    for item in additions:
+        key = normalize_email(item["Email"])
+        if key and key not in existing:
+            existing[key] = item
+    return list(existing.values())
+
+
+def ensure_recipient_state():
+    if "recipient_items" not in st.session_state:
+        st.session_state["recipient_items"] = []
+    if "manual_recipient_items" not in st.session_state:
+        st.session_state["manual_recipient_items"] = []
+    if "uploaded_recipient_items" not in st.session_state:
+        st.session_state["uploaded_recipient_items"] = []
+
+
+def remove_recipient(index: int) -> None:
+    items = st.session_state.get("recipient_items", [])
+    if 0 <= index < len(items):
+        items.pop(index)
+    st.session_state["recipient_items"] = items
+
+
+def attach_file_to_message(msg: MIMEMultipart, file_bytes: bytes, filename: str) -> None:
+    attachment = MIMEApplication(file_bytes, Name=filename)
+    attachment.add_header("Content-Disposition", f'attachment; filename="{filename}"')
+    msg.attach(attachment)
+
+
 def build_message(
     name: str,
     meeting_date: str,
@@ -312,7 +381,9 @@ def send_bulk_email(
     body: str,
     president_name: str,
     secretary_name: str,
-    recipients_df: pd.DataFrame,
+    recipient_items: list[dict],
+    attachment_bytes: bytes | None = None,
+    attachment_name: str | None = None,
 ) -> dict:
     results = {"sent": [], "failed": []}
     sender_email = sender_email.strip()
@@ -326,13 +397,15 @@ def send_bulk_email(
     except Exception as e:
         return {"error": str(e), "sent": [], "failed": []}
 
-    for _, row in recipients_df.iterrows():
-        name  = str(row["Name"]).strip()
-        email = str(row["Email"]).strip()
+    for recipient in recipient_items:
+        name = str(recipient.get("Name", "")).strip()
+        email = str(recipient.get("Email", "")).strip()
         try:
             msg = build_message(name, meeting_date, subject, body, president_name, secretary_name)
-            msg["From"]  = f"MUNA GEORGIA <{sender_email}>"
-            msg["To"]    = email
+            if attachment_bytes and attachment_name:
+                attach_file_to_message(msg, attachment_bytes, attachment_name)
+            msg["From"] = f"MUNA GEORGIA <{sender_email}>"
+            msg["To"] = email
             server.sendmail(sender_email, email, msg.as_string())
             results["sent"].append(email)
         except Exception as e:
@@ -504,13 +577,31 @@ with st.container():
         help="Must contain at least a **Name** column and an **Email** column. All other columns are ignored.",
     )
 
+ensure_recipient_state()
 recipients_df = None
 if uploaded_file:
     try:
-        recipients_df = load_recipients(uploaded_file)
-        count = len(recipients_df)
+        excel_df = load_recipients(uploaded_file)
+        excel_items = [
+            make_recipient(row["Name"], row["Email"], source="Excel")
+            for _, row in excel_df.iterrows()
+        ]
 
-        pills = "".join(f'<span class="pill">{row["Name"]}</span>' for _, row in recipients_df.iterrows())
+        if st.session_state.get("uploaded_file_key") != uploaded_file.name:
+            st.session_state["uploaded_file_key"] = uploaded_file.name
+            st.session_state["uploaded_recipient_items"] = excel_items
+            st.session_state["recipient_items"] = merge_recipient_lists(
+                excel_items,
+                st.session_state.get("manual_recipient_items", []),
+            )
+
+        recipients_df = pd.DataFrame(st.session_state["recipient_items"])
+        count = len(st.session_state["recipient_items"])
+
+        pills = "".join(
+            f'<span class="pill">{row["Name"]}</span>'
+            for row in st.session_state["recipient_items"]
+        )
         st.markdown(
             f'<div class="card">'
             f'<span style="font-size:0.8rem;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;">'
@@ -521,8 +612,55 @@ if uploaded_file:
         )
     except Exception as e:
         st.error(f"Could not read file: {e}")
+        st.session_state["uploaded_recipient_items"] = []
 else:
     st.info("Upload your members Excel file to continue. The file must have **Name** and **Email** columns.")
+
+with st.expander("Optional: add email addresses not in the Excel file"):
+    with st.form("manual_recipients_form", clear_on_submit=True):
+        manual_emails_text = st.text_area(
+            "Manual Recipient Emails",
+            placeholder="jane@example.com\njohn@example.com",
+            help="Add one email per line or comma-separated. These recipients will be merged with the uploaded list.",
+        )
+        add_manual = st.form_submit_button("Add manual recipients")
+
+    if add_manual:
+        manual_items = parse_manual_emails(manual_emails_text)
+        if manual_items:
+            existing_manual = st.session_state.get("manual_recipient_items", [])
+            st.session_state["manual_recipient_items"] = merge_recipient_lists(existing_manual, manual_items)
+            st.session_state["recipient_items"] = merge_recipient_lists(
+                st.session_state.get("uploaded_recipient_items", []),
+                st.session_state["manual_recipient_items"],
+            )
+            st.success(f"Added {len(manual_items)} manual recipient{'s' if len(manual_items) != 1 else ''}.")
+        else:
+            st.warning("No valid email addresses were found. Please enter valid emails.")
+
+recipient_items = st.session_state.get("recipient_items", [])
+if recipient_items:
+    st.markdown(
+        '<div class="card"><div style="font-size:0.9rem;color:var(--muted);margin-bottom:0.9rem;">'
+        f'Current recipients ({len(recipient_items)}):</div>',
+        unsafe_allow_html=True,
+    )
+    for index, recipient in enumerate(recipient_items):
+        cols = st.columns([10, 1])
+        cols[0].markdown(
+            f'**{recipient["Name"]}** — {recipient["Email"]} '
+            f'<span style="color:var(--muted);font-size:0.84rem;">({recipient["Source"]})</span>',
+            unsafe_allow_html=True,
+        )
+        cols[1].button(
+            "✕",
+            key=f"remove_{index}_{recipient['Email']}",
+            on_click=remove_recipient,
+            args=(index,),
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
+else:
+    st.info("No recipients available yet. Upload an Excel file or add manual email addresses.")
 
 
 # ──────────────────────────────────────────────
@@ -573,6 +711,12 @@ with st.form("minutes_form", clear_on_submit=False):
         ),
     )
 
+    attachment_file = st.file_uploader(
+        "Optional Attachment",
+        type=None,
+        help="Attach any file to include with every email. This is optional.",
+    )
+
     send_button = st.form_submit_button("  ✉  Distribute to All Members  ", use_container_width=False)
 
 
@@ -581,12 +725,13 @@ with st.form("minutes_form", clear_on_submit=False):
 # ──────────────────────────────────────────────
 if send_button:
     errors = []
+    recipient_items = st.session_state.get("recipient_items", [])
     if not sender_email:
         errors.append("Sender email is required (set in sidebar or Secrets).")
     if not app_password:
         errors.append("Gmail App Password is required (set in sidebar or Secrets).")
-    if recipients_df is None:
-        errors.append("Please upload a recipient Excel file in Step 1.")
+    if not recipient_items:
+        errors.append("Please upload a recipient Excel file in Step 1 or add manual recipient emails.")
     if not minutes_text.strip():
         errors.append("The minutes body cannot be empty.")
     if not president_name.strip():
@@ -598,8 +743,10 @@ if send_button:
         for err in errors:
             st.error(err)
     else:
-        total = len(recipients_df)
+        total = len(recipient_items)
         progress_bar = st.progress(0, text="Preparing to send…")
+        attachment_bytes = attachment_file.read() if attachment_file else None
+        attachment_name = attachment_file.name if attachment_file else None
 
         def send_with_progress():
             results = {"sent": [], "failed": []}
@@ -611,9 +758,9 @@ if send_button:
             except Exception as e:
                 return {"error": str(e), "sent": [], "failed": []}
 
-            for i, (_, row) in enumerate(recipients_df.iterrows()):
-                name  = str(row["Name"]).strip()
-                email = str(row["Email"]).strip()
+            for i, recipient in enumerate(recipient_items):
+                name = str(recipient.get("Name", "")).strip()
+                email = str(recipient.get("Email", "")).strip()
                 pct = int((i / total) * 100)
                 progress_bar.progress(pct, text=f"Sending to {name}…  ({i}/{total})")
                 try:
@@ -625,8 +772,10 @@ if send_button:
                         president_name,
                         secretary_name,
                     )
+                    if attachment_bytes and attachment_name:
+                        attach_file_to_message(msg, attachment_bytes, attachment_name)
                     msg["From"] = f"MUNA GEORGIA <{sender_email}>"
-                    msg["To"]   = email
+                    msg["To"] = email
                     server.sendmail(sender_email, email, msg.as_string())
                     results["sent"].append(email)
                 except Exception as e:
@@ -644,7 +793,7 @@ if send_button:
                 unsafe_allow_html=True,
             )
         else:
-            sent_count   = len(result["sent"])
+            sent_count = len(result["sent"])
             failed_count = len(result["failed"])
 
             if sent_count:
@@ -659,7 +808,7 @@ if send_button:
                 for f in result["failed"]:
                     st.caption(f"• {f['email']} — {f['reason']}")
 
-if recipients_df is not None and minutes_text.strip() and president_name.strip() and secretary_name.strip():
+if st.session_state.get("recipient_items") and minutes_text.strip() and president_name.strip() and secretary_name.strip():
     try:
         pdf_bytes = create_minutes_pdf(
             meeting_date=str(meeting_date),
